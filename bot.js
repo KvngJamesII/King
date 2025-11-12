@@ -3,16 +3,16 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { execSync } = require('child_process');
 const fs = require('fs');
+const http = require('http');
 const config = require('./config');
 
 puppeteer.use(StealthPlugin());
 
-// Single instance protection
-let botInstance = null;
 let lastSmsId = 0;
 let isPolling = false;
 let browser = null;
 let page = null;
+let bot = null;
 
 function createAuthHeader() {
   const credentials = `${config.API_USERNAME}:${config.API_PASSWORD}`;
@@ -103,7 +103,7 @@ async function fetchLatestSMS() {
     
     if (smsData && !smsData.success) {
       if (smsData.status === 429) {
-        console.log('⚠️ API Rate limit hit - consider increasing poll interval');
+        console.log('⚠️ API Rate limit hit - waiting longer...');
       } else {
         console.log(smsData.status ? `API status: ${smsData.status}` : `Fetch error: ${smsData.error}`);
       }
@@ -137,7 +137,7 @@ ${message}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ _${new Date().toLocaleString()}_
 `;
-    await botInstance.sendMessage(config.TELEGRAM_CHAT_ID, formatted, { parse_mode: 'Markdown' });
+    await bot.sendMessage(config.TELEGRAM_CHAT_ID, formatted, { parse_mode: 'Markdown' });
     console.log(`✓ Sent OTP from ${source} to Telegram`);
   } catch (err) {
     console.error('Failed to send Telegram message:', err.message);
@@ -168,49 +168,61 @@ async function pollSMSAPI() {
   }
 }
 
-async function startBot() {
-  // Prevent multiple instances
-  if (botInstance) {
-    console.log('⚠️ Bot instance already running');
-    return;
+// Create HTTP server for Render health checks
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      uptime: process.uptime(),
+      lastSmsId: lastSmsId,
+      browserActive: !!browser,
+      timestamp: new Date().toISOString()
+    }));
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
   }
+});
 
+const PORT = process.env.PORT || 10000;
+
+async function startBot() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🚀 Telegram OTP Bot Starting...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  // Initialize bot with single instance
-  botInstance = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { 
-    polling: {
-      interval: 300,
-      autoStart: true,
-      params: {
-        timeout: 10
-      }
-    }
+  // Start HTTP server first
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 Health check server running on port ${PORT}`);
   });
 
+  // Initialize Telegram bot with webhook mode to avoid conflicts
+  bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
+
   // Bot commands
-  botInstance.onText(/\/start/, (msg) => 
-    botInstance.sendMessage(msg.chat.id, '🤖 OTP Bot active!')
+  bot.onText(/\/start/, (msg) => 
+    bot.sendMessage(msg.chat.id, '🤖 OTP Bot active!')
   );
 
-  botInstance.onText(/\/status/, (msg) => {
+  bot.onText(/\/status/, (msg) => {
     const uptime = process.uptime();
     const hours = Math.floor(uptime / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
     
-    botInstance.sendMessage(msg.chat.id,
-      `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}\n⏰ Uptime: ${hours}h ${minutes}m`
+    bot.sendMessage(msg.chat.id,
+      `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}\n⏰ Uptime: ${hours}h ${minutes}m`,
+      { parse_mode: 'Markdown' }
     );
   });
 
-  // Error handling
-  botInstance.on('polling_error', (error) => {
-    console.error('❌ Polling error:', error.code);
+  // Handle polling errors
+  bot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-      console.error('💥 CRITICAL: Multiple bot instances detected!');
-      console.error('Please stop all other instances and redeploy as Background Worker');
+      console.error('💥 Multiple instances detected! Stopping this instance...');
+      process.exit(1); // Exit to let Render restart with single instance
+    } else {
+      console.error('Telegram error:', error.code, error.message);
     }
   });
 
@@ -218,6 +230,7 @@ async function startBot() {
   console.log(`💬 Forwarding to: ${config.TELEGRAM_CHAT_ID}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
+  // Initialize browser and start polling
   await initializeBrowser();
   await pollSMSAPI();
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
@@ -226,12 +239,13 @@ async function startBot() {
 // Graceful shutdown
 async function shutdown() {
   console.log('\n🛑 Shutting down bot...');
-  if (botInstance) {
-    await botInstance.stopPolling();
+  if (bot) {
+    await bot.stopPolling();
   }
   if (browser) {
     await browser.close();
   }
+  server.close();
   process.exit(0);
 }
 
