@@ -4,6 +4,7 @@
   "description": "Telegram bot that forwards OTP messages from SMS API to Telegram group",
   "main": "bot.js",
   "scripts": {
+    "postinstall": "npx puppeteer browsers install chrome",
     "start": "node bot.js"
   },
   "keywords": [
@@ -12,8 +13,6 @@
     "otp",
     "sms"
   ],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "axios": "^1.13.2",
     "cloudscraper": "^4.6.0",
