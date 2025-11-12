@@ -7,8 +7,8 @@ const config = require('./config');
 
 puppeteer.use(StealthPlugin());
 
-const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
-
+// Single instance protection
+let botInstance = null;
 let lastSmsId = 0;
 let isPolling = false;
 let browser = null;
@@ -23,7 +23,7 @@ async function initializeBrowser() {
   try {
     console.log('🌐 Initializing browser...');
 
-    let chromePath = '/usr/bin/google-chrome'; // default system Chrome on Render
+    let chromePath = '/usr/bin/google-chrome';
 
     if (!fs.existsSync(chromePath)) {
       console.log('⚠️ System Chrome not found, checking Puppeteer...');
@@ -81,21 +81,39 @@ async function fetchLatestSMS() {
 
     const smsData = await page.evaluate(async (apiUrl, authHeader) => {
       try {
-        const response = await fetch(apiUrl, { headers: { 'Authorization': authHeader, 'Accept': 'application/json' } });
-        if (response.ok) return { success: true, data: await response.json() };
-        else return { success: false, status: response.status, statusText: response.statusText };
+        const response = await fetch(apiUrl, { 
+          headers: { 
+            'Authorization': authHeader, 
+            'Accept': 'application/json' 
+          } 
+        });
+        if (response.ok) {
+          return { success: true, data: await response.json() };
+        } else {
+          return { success: false, status: response.status, statusText: response.statusText };
+        }
       } catch (err) {
         return { success: false, error: err.message };
       }
     }, url, createAuthHeader());
 
-    if (smsData && smsData.success && Array.isArray(smsData.data)) return smsData.data;
-    if (smsData && !smsData.success) console.log(smsData.status ? `API status: ${smsData.status}` : `Fetch error: ${smsData.error}`);
+    if (smsData && smsData.success && Array.isArray(smsData.data)) {
+      return smsData.data;
+    }
+    
+    if (smsData && !smsData.success) {
+      if (smsData.status === 429) {
+        console.log('⚠️ API Rate limit hit - consider increasing poll interval');
+      } else {
+        console.log(smsData.status ? `API status: ${smsData.status}` : `Fetch error: ${smsData.error}`);
+      }
+    }
     return [];
   } catch (err) {
     console.error('Error fetching SMS:', err.message);
     if (browser) await browser.close().catch(() => {});
-    browser = null; page = null;
+    browser = null; 
+    page = null;
     return [];
   }
 }
@@ -119,7 +137,7 @@ ${message}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ _${new Date().toLocaleString()}_
 `;
-    await bot.sendMessage(config.TELEGRAM_CHAT_ID, formatted, { parse_mode: 'Markdown' });
+    await botInstance.sendMessage(config.TELEGRAM_CHAT_ID, formatted, { parse_mode: 'Markdown' });
     console.log(`✓ Sent OTP from ${source} to Telegram`);
   } catch (err) {
     console.error('Failed to send Telegram message:', err.message);
@@ -140,7 +158,9 @@ async function pollSMSAPI() {
           lastSmsId = sms.id || lastSmsId;
         }
       }
-    } else console.log('No new SMS messages');
+    } else {
+      console.log('📭 No new SMS messages');
+    }
   } catch (err) {
     console.error('Polling error:', err.message);
   } finally {
@@ -148,21 +168,75 @@ async function pollSMSAPI() {
   }
 }
 
-bot.onText(/\/start/, (msg) => bot.sendMessage(msg.chat.id, '🤖 OTP Bot active!'));
-bot.onText(/\/status/, (msg) => bot.sendMessage(msg.chat.id,
-  `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}`
-));
-
 async function startBot() {
-  console.log('🚀 Telegram OTP Bot started!');
+  // Prevent multiple instances
+  if (botInstance) {
+    console.log('⚠️ Bot instance already running');
+    return;
+  }
+
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🚀 Telegram OTP Bot Starting...');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  // Initialize bot with single instance
+  botInstance = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { 
+    polling: {
+      interval: 300,
+      autoStart: true,
+      params: {
+        timeout: 10
+      }
+    }
+  });
+
+  // Bot commands
+  botInstance.onText(/\/start/, (msg) => 
+    botInstance.sendMessage(msg.chat.id, '🤖 OTP Bot active!')
+  );
+
+  botInstance.onText(/\/status/, (msg) => {
+    const uptime = process.uptime();
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    
+    botInstance.sendMessage(msg.chat.id,
+      `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}\n⏰ Uptime: ${hours}h ${minutes}m`
+    );
+  });
+
+  // Error handling
+  botInstance.on('polling_error', (error) => {
+    console.error('❌ Polling error:', error.code);
+    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+      console.error('💥 CRITICAL: Multiple bot instances detected!');
+      console.error('Please stop all other instances and redeploy as Background Worker');
+    }
+  });
+
   console.log(`📡 Polling every ${config.POLL_INTERVAL/1000}s`);
   console.log(`💬 Forwarding to: ${config.TELEGRAM_CHAT_ID}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
   await initializeBrowser();
-  pollSMSAPI();
+  await pollSMSAPI();
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
 }
 
-startBot();
+// Graceful shutdown
+async function shutdown() {
+  console.log('\n🛑 Shutting down bot...');
+  if (botInstance) {
+    await botInstance.stopPolling();
+  }
+  if (browser) {
+    await browser.close();
+  }
+  process.exit(0);
+}
 
-process.on('SIGINT', async () => { console.log('🛑 Shutting down bot...'); if (browser) await browser.close(); process.exit(); });
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// Start the bot
+startBot();
