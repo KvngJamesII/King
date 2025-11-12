@@ -2,6 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const config = require('./config');
+const { execSync } = require('child_process');
 
 puppeteer.use(StealthPlugin());
 
@@ -22,8 +23,16 @@ async function initializeBrowser() {
   try {
     console.log('🌐 Initializing browser...');
 
-    // ✅ make sure Puppeteer uses the right Chrome binary
-    const chromePath = puppeteer.executablePath();
+    let chromePath;
+    try {
+      chromePath = puppeteer.executablePath();
+      console.log('🧭 Using Puppeteer Chrome at:', chromePath);
+    } catch (err) {
+      console.log('⚠️ Chrome not found, installing Chromium...');
+      execSync('npx puppeteer browsers install chrome', { stdio: 'inherit' });
+      chromePath = puppeteer.executablePath();
+      console.log('✅ Chromium installed at:', chromePath);
+    }
 
     browser = await puppeteer.launch({
       headless: true,
@@ -121,7 +130,6 @@ async function sendOTPToTelegram(smsData) {
     const formattedMessage = `
 🔔 *NEW OTP RECEIVED*
 ━━━━━━━━━━━━━━━━━━━━
-
 📤 *Source:* \`${source}\`
 📱 *Destination:* \`${destination}\`
 
@@ -129,7 +137,6 @@ async function sendOTPToTelegram(smsData) {
 \`\`\`
 ${message}
 \`\`\`
-
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ _${new Date().toLocaleString()}_
 `;
@@ -176,8 +183,7 @@ bot.on('polling_error', (error) => {
 });
 
 bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, '🤖 OTP Bot is active and monitoring for new SMS messages!');
+  bot.sendMessage(msg.chat.id, '🤖 OTP Bot is active and monitoring for new SMS messages!');
 });
 
 bot.onText(/\/status/, (msg) => {
