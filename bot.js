@@ -50,17 +50,49 @@ function saveSentMessages() {
 }
 
 async function solveMathCaptcha(page) {
-  return await page.evaluate(() => {
-    const labels = Array.from(document.querySelectorAll('label, span, div'));
-    for (const el of labels) {
-      const text = el.textContent.trim();
-      const match = text.match(/(\d+)\s*\+\s*(\d+)/);
-      if (match) {
-        return parseInt(match[1]) + parseInt(match[2]);
+  try {
+    // Wait for page to fully load
+    await page.waitForTimeout(2000);
+    
+    const result = await page.evaluate(() => {
+      // Try multiple selectors to find the captcha text
+      const selectors = [
+        'label', 'span', 'div', 'p', 
+        '[class*="captcha"]', '[class*="math"]', '[id*="captcha"]',
+        'input[placeholder*="answer"]', 'input[placeholder*="result"]'
+      ];
+      
+      // Get all text elements
+      const allElements = document.querySelectorAll('*');
+      for (const el of allElements) {
+        const text = el.textContent.trim();
+        
+        // Multiple regex patterns to catch different formats
+        let match = text.match(/(\d+)\s*\+\s*(\d+)/);
+        if (match) {
+          return parseInt(match[1]) + parseInt(match[2]);
+        }
+        
+        match = text.match(/(\d+)\s*plus\s*(\d+)/i);
+        if (match) {
+          return parseInt(match[1]) + parseInt(match[2]);
+        }
+        
+        // Try simpler pattern: just look for "number + number"
+        match = text.match(/(\d+)\s*[\+plus]\s*(\d+)/i);
+        if (match) {
+          return parseInt(match[1]) + parseInt(match[2]);
+        }
       }
-    }
+      
+      return null;
+    });
+    
+    return result;
+  } catch (err) {
+    console.log('⚠️ Captcha solver error:', err.message);
     return null;
-  });
+  }
 }
 
 async function initializeBrowser() {
@@ -95,11 +127,26 @@ async function initializeBrowser() {
         '--disable-client-side-phishing-detection',
         '--disable-sync',
         '--disable-default-apps',
-        '--disable-component-update'
+        '--disable-component-update',
+        '--disable-web-security',
+        '--allow-cross-origin-auth-prompt'
       ]
     });
 
     page = await browser.newPage();
+    
+    // Set user agent and bypass headers
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept': '*/*',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache'
+    });
+    
+    // Disable cache to prevent blocking
+    await page.setCacheEnabled(false);
 
     console.log('🔐 Logging into panel...');
     
