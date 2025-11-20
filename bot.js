@@ -1,12 +1,8 @@
 const TelegramBot = require('node-telegram-bot-api');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const { execSync } = require('child_process');
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const http = require('http');
 const config = require('./config');
-
-puppeteer.use(StealthPlugin());
 
 let sentMessageHashes = new Set();
 let isPolling = false;
@@ -51,8 +47,8 @@ function saveSentMessages() {
 
 async function solveMathCaptcha(page) {
   try {
-    // Wait for page to fully load (use Promise instead of deprecated waitForTimeout)
-    await new Promise(r => setTimeout(r, 2500));
+    // Use Promise-based delay instead of deprecated waitForTimeout
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
     const result = await page.evaluate(() => {
       // Get all text elements
@@ -82,6 +78,12 @@ async function solveMathCaptcha(page) {
       return null;
     });
     
+    if (result) {
+      console.log('🧮 Math captcha solved:', result);
+    } else {
+      console.log('⚠️ Could not find math captcha');
+    }
+    
     return result;
   } catch (err) {
     console.log('⚠️ Captcha solver error:', err.message);
@@ -93,21 +95,8 @@ async function initializeBrowser() {
   try {
     console.log('🌐 Initializing browser...');
 
-    let chromePath;
-    try {
-      const result = execSync('which chromium', { encoding: 'utf-8' }).trim();
-      if (result) {
-        chromePath = result;
-        console.log('🧭 Using system Chromium at:', chromePath);
-      }
-    } catch {
-      console.log('⚠️ System Chromium not found, trying Puppeteer...');
-      chromePath = puppeteer.executablePath();
-    }
-
     browser = await puppeteer.launch({
-      headless: true,
-      executablePath: chromePath,
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -118,43 +107,60 @@ async function initializeBrowser() {
         '--disable-features=IsolateOrigins,site-per-process',
         '--no-first-run',
         '--no-default-browser-check',
-        '--disable-client-side-phishing-detection',
         '--disable-sync',
         '--disable-default-apps',
         '--disable-component-update',
         '--disable-web-security',
-        '--allow-cross-origin-auth-prompt'
-      ]
+        '--disable-blink-features=AutomationControlled',
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      ],
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/root/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome'
     });
 
     page = await browser.newPage();
     
-    // Set user agent and bypass headers
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+    // Set viewport
+    await page.setViewport({ width: 1920, height: 1080 });
+    
+    // Set user agent
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Set extra headers
     await page.setExtraHTTPHeaders({
-      'Accept': '*/*',
-      'Accept-Encoding': 'gzip, deflate, br',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate',
       'Accept-Language': 'en-US,en;q=0.9',
       'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache'
+      'Pragma': 'no-cache',
+      'Connection': 'keep-alive'
     });
     
-    // Disable cache to prevent blocking
+    // Disable cache
     await page.setCacheEnabled(false);
+
+    // Remove webdriver flag
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+    });
 
     console.log('🔐 Logging into panel...');
     
-    // Try navigation with fallback strategy
+    // Navigate to login page with retry logic
     let navigationSuccess = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await page.goto(config.LOGIN_URL, { waitUntil: 'networkidle0', timeout: 45000 }).catch(() => {});
+        await page.goto(config.LOGIN_URL, { 
+          waitUntil: 'networkidle2', 
+          timeout: 30000 
+        });
         navigationSuccess = true;
         break;
       } catch (navErr) {
         console.log(`⚠️ Navigation attempt ${attempt} failed: ${navErr.message}`);
         if (attempt < 3) {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
     }
@@ -163,21 +169,24 @@ async function initializeBrowser() {
       throw new Error('Failed to navigate to login page after 3 attempts');
     }
     
-    await new Promise(r => setTimeout(r, 1000));
+    // Wait for login form
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
+    // Solve captcha
     const captchaAnswer = await solveMathCaptcha(page);
     if (!captchaAnswer) {
       throw new Error('Could not solve math captcha');
     }
     
-    console.log('🧮 Math captcha solved:', captchaAnswer);
-    
+    // Fill login form
+    await page.waitForSelector('input[name="username"]', { timeout: 5000 });
     await page.type('input[name="username"]', config.API_USERNAME);
     await page.type('input[name="password"]', config.API_PASSWORD);
     await page.type('input[name="capt"]', captchaAnswer.toString());
     
+    // Submit form
     await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {}),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }),
       page.keyboard.press('Enter')
     ]);
     
@@ -189,15 +198,23 @@ async function initializeBrowser() {
     console.log('✅ Logged in successfully');
     console.log('📊 Navigating to SMS reports page...');
     
-    await page.goto(config.SMS_REPORTS_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.goto(config.SMS_REPORTS_URL, { 
+      waitUntil: 'networkidle2', 
+      timeout: 30000 
+    });
     
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     console.log('✅ Browser initialized and logged in');
     reconnectAttempts = 0;
     return true;
   } catch (err) {
     console.error('❌ Failed to initialize browser:', err.message);
+    if (browser) {
+      await browser.close().catch(() => {});
+      browser = null;
+      page = null;
+    }
     return false;
   }
 }
@@ -223,7 +240,7 @@ async function ensureBrowserActive() {
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       reconnectAttempts++;
       console.log(`🔄 Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
-      await new Promise(r => setTimeout(r, RECONNECT_DELAY));
+      await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
       return await initializeBrowser();
     } else {
       console.error('❌ Max reconnection attempts reached');
@@ -283,14 +300,18 @@ async function fetchLatestSMS() {
 
     // Navigate with more lenient settings
     try {
-      await page.goto(config.SMS_REPORTS_URL, { waitUntil: 'networkidle0', timeout: 30000 }).catch(() => {});
+      await page.goto(config.SMS_REPORTS_URL, { 
+        waitUntil: 'networkidle2', 
+        timeout: 30000 
+      });
     } catch (navErr) {
       console.log('⚠️ Navigation warning (continuing):', navErr.message);
     }
     
-    // Wait a bit for page content
-    await new Promise(r => setTimeout(r, 1000));
+    // Wait for page to load
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
+    // Trigger data reload
     await page.evaluate((date1, date2) => {
       if (typeof jQuery !== 'undefined' && jQuery.fn.dataTable) {
         try {
@@ -299,7 +320,7 @@ async function fetchLatestSMS() {
             table.ajax.reload();
           }
         } catch (e) {
-          // Table might not exist
+          console.log('Table reload failed:', e);
         }
       }
     }, fdate1, fdate2);
@@ -434,7 +455,6 @@ async function pollSMSAPI() {
   }
 }
 
-// Health check function
 async function performHealthCheck() {
   const timeSinceLastPoll = Date.now() - lastSuccessfulPoll;
   const minutesSinceLastPoll = Math.floor(timeSinceLastPoll / 60000);
@@ -445,7 +465,6 @@ async function performHealthCheck() {
   console.log(`   - Total polls: ${pollCount}`);
   console.log(`   - Messages tracked: ${sentMessageHashes.size}\n`);
   
-  // If no successful poll in 5 minutes, try to reconnect
   if (timeSinceLastPoll > 300000 && browser) {
     console.log('⚠️ No successful poll in 5 minutes, forcing reconnection...');
     if (browser) {
@@ -457,11 +476,10 @@ async function performHealthCheck() {
   }
 }
 
-// Create HTTP server for Render health checks
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     const timeSinceLastPoll = Date.now() - lastSuccessfulPoll;
-    const isHealthy = timeSinceLastPoll < 300000; // Healthy if polled within last 5 minutes
+    const isHealthy = timeSinceLastPoll < 300000;
     
     res.writeHead(isHealthy ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -488,18 +506,14 @@ async function startBot() {
   console.log('🚀 Telegram OTP Bot Starting...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  // Load previously sent messages
   loadSentMessages();
 
-  // Start HTTP server first
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Health check server running on port ${PORT}`);
   });
 
-  // Initialize Telegram bot
   bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
 
-  // Bot commands
   bot.onText(/\/start/, (msg) => 
     bot.sendMessage(msg.chat.id, '🤖 OTP Bot active! Use /status to check connection.')
   );
@@ -526,18 +540,17 @@ async function startBot() {
     bot.sendMessage(msg.chat.id, statusMessage, { parse_mode: 'Markdown' });
   });
 
-  // Handle polling errors
   bot.on('polling_error', async (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
       telegramRetryAttempts++;
       console.error(`💥 Multiple instances detected! (Attempt ${telegramRetryAttempts}/${TELEGRAM_MAX_RETRY_ATTEMPTS})`);
       
       if (telegramRetryAttempts >= TELEGRAM_MAX_RETRY_ATTEMPTS) {
-        console.error('❌ Max retry attempts reached. Another instance may be running. Stopping...');
+        console.error('❌ Max retry attempts reached. Stopping...');
         process.exit(1);
       } else {
         console.log(`⏳ Waiting ${TELEGRAM_RETRY_DELAY/1000}s before retry...`);
-        await new Promise(r => setTimeout(r, TELEGRAM_RETRY_DELAY));
+        await new Promise(resolve => setTimeout(resolve, TELEGRAM_RETRY_DELAY));
         telegramRetryAttempts = 0;
       }
     } else {
@@ -550,15 +563,13 @@ async function startBot() {
   config.TELEGRAM_CHAT_IDS.forEach(id => console.log(`   - ${id}`));
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-  // Initialize browser and start polling
   const browserInitialized = await initializeBrowser();
   
   if (browserInitialized) {
-    // Send connection success message to all channels
     const connectionMessage = `✅ *OTP Bot Connected*
 
 The bot is now active and monitoring for OTPs.
-Use /status anytime you want to check connection status.
+Use /status anytime to check connection status.
 
 ⏱️ Poll interval: ${config.POLL_INTERVAL/1000}s`;
     
@@ -566,27 +577,19 @@ Use /status anytime you want to check connection status.
     console.log('✅ Connection notification sent to all channels\n');
   }
 
-  // Start polling immediately
   await pollSMSAPI();
-  
-  // Set up regular polling interval
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
-  
-  // Set up health check interval
   setInterval(performHealthCheck, HEALTH_CHECK_INTERVAL);
   
   console.log('✅ All systems initialized and running\n');
 }
 
-// Graceful shutdown
 async function shutdown() {
   console.log('\n🛑 Shutting down bot...');
   
-  // Save sent messages before shutdown
   saveSentMessages();
   console.log('💾 Saved message hashes');
   
-  // Notify channels about shutdown
   if (bot) {
     const shutdownMessage = '⚠️ *Bot Shutting Down*\n\nThe OTP bot is being stopped.';
     await sendToAllChannels(shutdownMessage, { parse_mode: 'Markdown' }).catch(() => {});
@@ -605,16 +608,12 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Handle uncaught errors
 process.on('uncaughtException', (err) => {
   console.error('💥 Uncaught Exception:', err);
-  // Don't exit, try to recover
 });
 
 process.on('unhandledRejection', (err) => {
   console.error('💥 Unhandled Rejection:', err);
-  // Don't exit, try to recover
 });
 
-// Start the bot
 startBot();
