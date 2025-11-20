@@ -51,21 +51,15 @@ function saveSentMessages() {
 
 async function solveMathCaptcha(page) {
   try {
-    // Wait for page to fully load
-    await page.waitForTimeout(2000);
+    // Wait for page to fully load (use Promise instead of deprecated waitForTimeout)
+    await new Promise(r => setTimeout(r, 2500));
     
     const result = await page.evaluate(() => {
-      // Try multiple selectors to find the captcha text
-      const selectors = [
-        'label', 'span', 'div', 'p', 
-        '[class*="captcha"]', '[class*="math"]', '[id*="captcha"]',
-        'input[placeholder*="answer"]', 'input[placeholder*="result"]'
-      ];
-      
       // Get all text elements
       const allElements = document.querySelectorAll('*');
       for (const el of allElements) {
         const text = el.textContent.trim();
+        if (!text) continue;
         
         // Multiple regex patterns to catch different formats
         let match = text.match(/(\d+)\s*\+\s*(\d+)/);
@@ -287,13 +281,25 @@ async function fetchLatestSMS() {
       }, 15000);
     });
 
-    await page.goto(config.SMS_REPORTS_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    // Navigate with more lenient settings
+    try {
+      await page.goto(config.SMS_REPORTS_URL, { waitUntil: 'networkidle0', timeout: 30000 }).catch(() => {});
+    } catch (navErr) {
+      console.log('⚠️ Navigation warning (continuing):', navErr.message);
+    }
+    
+    // Wait a bit for page content
+    await new Promise(r => setTimeout(r, 1000));
     
     await page.evaluate((date1, date2) => {
       if (typeof jQuery !== 'undefined' && jQuery.fn.dataTable) {
-        const table = jQuery('table').DataTable();
-        if (table) {
-          table.ajax.reload();
+        try {
+          const table = jQuery('table').DataTable();
+          if (table) {
+            table.ajax.reload();
+          }
+        } catch (e) {
+          // Table might not exist
         }
       }
     }, fdate1, fdate2);
