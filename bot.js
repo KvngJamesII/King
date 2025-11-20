@@ -88,14 +88,39 @@ async function initializeBrowser() {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--disable-software-rasterizer',
-        '--disable-extensions'
+        '--disable-extensions',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-client-side-phishing-detection',
+        '--disable-sync',
+        '--disable-default-apps',
+        '--disable-component-update'
       ]
     });
 
     page = await browser.newPage();
 
     console.log('🔐 Logging into panel...');
-    await page.goto(config.LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+    
+    // Try navigation with fallback strategy
+    let navigationSuccess = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await page.goto(config.LOGIN_URL, { waitUntil: 'networkidle0', timeout: 45000 }).catch(() => {});
+        navigationSuccess = true;
+        break;
+      } catch (navErr) {
+        console.log(`⚠️ Navigation attempt ${attempt} failed: ${navErr.message}`);
+        if (attempt < 3) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+    }
+    
+    if (!navigationSuccess) {
+      throw new Error('Failed to navigate to login page after 3 attempts');
+    }
     
     await new Promise(r => setTimeout(r, 1000));
     
